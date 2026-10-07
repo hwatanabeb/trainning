@@ -69,6 +69,7 @@
   var STORE = 'asatore-record';
   var CFG_STORE = 'asatore-config';     // 教材の一覧などの控え（秘密ではない）。開いた瞬間に画面を出すために使う
   var TOKEN_STORE = 'asatore-idtoken';  // GoogleのIDトークン。このタブの間だけ（sessionStorage）
+  var SESSION_STORE = 'asatore-session'; // GASが発行したログイン済みの印（期限なし）。Googleログインは最初の1回だけで済む
   // 送り先はGASのウェブアプリ（…/exec）だけを認める。細工したリンクで鍵を他所へ送らせないため
   var GAS_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
   var hash = new URLSearchParams(location.hash.slice(1));
@@ -87,7 +88,13 @@
   var presetName = hash.get('p') || '';
 
   var $ = function (id) { return document.getElementById(id); };
-  var C = null, clientId = '', idToken = '', slot = '', rows = [], sid = '', dateTouched = false;
+  var waitingLogin = false;
+  var C = null, clientId = '', idToken = '', session = '', slot = '', rows = [], sid = '', dateTouched = false;
+  function loadSession() {
+    try { var v = JSON.parse(localStorage.getItem(SESSION_STORE) || 'null'); if (v && v.s) { session = v.s; return v; } } catch (e) {}
+    return null;
+  }
+  function saveSession(s, email) { session = s; try { localStorage.setItem(SESSION_STORE, JSON.stringify({ s: s, email: email })); } catch (e) {} }
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function today() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
@@ -106,20 +113,17 @@
   function jwtPayload(t) {
     try { return JSON.parse(decodeURIComponent(escape(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))))); } catch (e) { return null; }
   }
-  function loadSavedToken() {
-    try {
-      var t = sessionStorage.getItem(TOKEN_STORE) || '';
-      var p = t && jwtPayload(t);
-      if (p && p.exp * 1000 > Date.now() + 60000) { idToken = t; return p; }
-    } catch (e) {}
-    return null;
+  function clearToken() {
+    idToken = ''; session = ''; $('who').classList.add('hidden');
+    try { sessionStorage.removeItem(TOKEN_STORE); localStorage.removeItem(TOKEN_STORE); localStorage.removeItem(SESSION_STORE); } catch (e) {}
   }
-  function clearToken() { idToken = ''; $('who').classList.add('hidden'); try { sessionStorage.removeItem(TOKEN_STORE); localStorage.removeItem(TOKEN_STORE); } catch (e) {} }
   function showWho(p) {
     $('who').innerHTML = esc(p.email) + ' でログイン中 ・ <a href="#" id="logout">ログアウト</a>';
     $('who').classList.remove('hidden');
     $('logout').onclick = function (ev) {
-      ev.preventDefault(); clearToken();
+      ev.preventDefault();
+      if (session) call('POST', { action: 'logout', session: session }).catch(function () {});
+      clearToken();
       if (window.google && google.accounts) google.accounts.id.disableAutoSelect();
       askLogin(true);
     };
@@ -138,12 +142,21 @@
     var p = jwtPayload(r.credential);
     if (!p) { msg('ログインに失敗しました。', false); return; }
     idToken = r.credential;
-    try { sessionStorage.setItem(TOKEN_STORE, idToken); } catch (e) {}
-    clearTimeout(loginTimer); $('login').classList.add('hidden'); showWho(p);
-    var q = pending; pending = []; q.forEach(function (f) { f(); });
+    clearTimeout(loginTimer); $('login').classList.add('hidden');
+    // Googleログインを確かめてもらい、期限なしのログイン済みの印を受け取る
+    call('POST', { action: 'login' }).then(function (j) {
+      saveSession(j.session, j.email); idToken = '';
+      showWho({ email: j.email });
+      var q = pending; pending = []; q.forEach(function (f) { f(); });
+    }).catch(function (err) {
+      // どんな失敗でもログインボタンを出し直し、送信待ちを解除する（ボタンが反応しない状態にしない）
+      clearToken(); waitingLogin = false;
+      msg((err.message || String(err)) + ' もう一度ログインしてください。', false);
+      askLogin(true);
+    });
   }
   // ログインが済んだら fn を実行する。自動ログインで済めばボタンは出さない（1.5秒たっても済まなければ出す）
-  function whenLoggedIn(fn) { if (idToken) { fn(); return; } pending.push(fn); askLogin(false); }
+  function whenLoggedIn(fn) { if (session) { fn(); return; } pending.push(fn); askLogin(false); }
   // retry=true（許可されていないアカウントだった・ログアウトした）のときは自動選択を止めて、すぐボタンを出す
   function askLogin(retry) {
     if (!clientId) return;
@@ -154,7 +167,7 @@
       clearTimeout(loginTimer);
       if (retry) { google.accounts.id.disableAutoSelect(); $('login').classList.remove('hidden'); return; }
       if (!prompted) { prompted = true; google.accounts.id.prompt(); }
-      loginTimer = setTimeout(function () { if (!idToken) $('login').classList.remove('hidden'); }, 1500);
+      loginTimer = setTimeout(function () { if (!session && !idToken) $('login').classList.remove('hidden'); }, 1500);
     }).catch(function (err) { msg(err.message, false); });
   }
 
@@ -164,7 +177,8 @@
     var url = api;
     if (method === 'GET') url += '?api=client&k=' + encodeURIComponent(key);
     else {
-      body.k = key; body.idToken = idToken;
+      body.k = key;
+      if (session && body.action !== 'login') body.session = session; else body.idToken = idToken;
       opt.body = JSON.stringify(body); opt.headers = { 'Content-Type': 'text/plain;charset=utf-8' };
     }
     return fetch(url, opt).then(function (r) {
@@ -281,7 +295,7 @@
   }
 
   /* ---------- 送信（押したらすぐ画面を空にし、結果はあとから表示） ---------- */
-  var sending = 0, waitingLogin = false;
+  var sending = 0;
   function collect() {
     sync();
     var use = rows.filter(function (r) { return r.mat; }).map(function (r) { return { mat: r.mat, min: r.min, keys: r.keys, kind: r.kind }; });
@@ -300,7 +314,7 @@
   }
   function names(p) { return p.rows.map(function (r) { return r.mat; }).join('・'); }
   function submit(p) {
-    if (!idToken) {
+    if (!session) {
       if (waitingLogin) return;  // ログイン待ちの間の連打は1回にまとめる
       waitingLogin = true; msg('Googleログインのあと送信します…', true);
       whenLoggedIn(function () { waitingLogin = false; var q = collect(); if (q) submit(q); });
@@ -319,7 +333,7 @@
         clearToken();
         msg(err.message + (back ? ' ログインし直すと、自動でもう一度送ります。' : '（送れなかった教材: ' + names(p) + '。ログイン後にもう一度入力してください）'), false);
         checkClientId();
-        if (back) pending.push(function () { var q = collect(); if (q) submit(q); });
+        if (back) { waitingLogin = true; pending.push(function () { waitingLogin = false; var q = collect(); if (q) submit(q); }); }
         askLogin(true);
         return;
       }
@@ -340,9 +354,9 @@
 
   /* ---------- 起動 ---------- */
   if (!api || !key) { msg('リンクが正しくありません。メールで届いたリンクから開いてください。', false); return; }
-  loadGis();  // Googleログインの読み込みを先に始めておく
-  var tok = loadSavedToken();
-  if (tok) showWho(tok);
+  var ses = loadSession();
+  if (ses) showWho({ email: ses.email || '' });
+  else loadGis();  // ログイン済みの印がない時だけ、Googleログインの読み込みを先に始めておく
   var cache = readCache();
   if (cache) {
     // 前回の控えで、すぐに画面を出す。ログインと最新化は裏で行う
