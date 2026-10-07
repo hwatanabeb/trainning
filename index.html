@@ -35,6 +35,11 @@
 <div class="wrap">
   <h1 id="title">朝トレ 記録</h1>
   <div id="msg"></div>
+  <div id="login" class="card hidden">
+    <p style="margin:4px 0 12px">記録するには Google でログインしてください。</p>
+    <div id="gbtn"></div>
+  </div>
+  <div id="who" class="hidden" style="font-size:13px;color:var(--sub);margin:-4px 0 10px"></div>
   <div id="form" class="hidden">
     <div class="card">
       <label for="date">日付</label><input type="date" id="date">
@@ -67,6 +72,65 @@
     api = saved.u; key = saved.k;
   }
   var presetName = hash.get('p') || '';
+
+  // Googleログイン（IDトークン）。このタブの間だけ保持する（同じ github.io の他ページから読まれないよう localStorage には置かない）。
+  // 開き直したときは Google の自動ログインで取り直す
+  var TOKEN_STORE = 'asatore-idtoken';
+  var idToken = '', clientId = '', gisReady = null;
+  function jwtPayload(t) {
+    try { return JSON.parse(decodeURIComponent(escape(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))))); } catch (e) { return null; }
+  }
+  function loadSavedToken() {
+    try {
+      var t = sessionStorage.getItem(TOKEN_STORE) || '';
+      var p = t && jwtPayload(t);
+      if (p && p.exp * 1000 > Date.now() + 60000) { idToken = t; return p; }
+    } catch (e) {}
+    return null;
+  }
+  function clearToken() { idToken = ''; try { sessionStorage.removeItem(TOKEN_STORE); localStorage.removeItem(TOKEN_STORE); } catch (e) {} }
+  function showWho(p) {
+    $('who').innerHTML = esc(p.email) + ' でログイン中 ・ <a href="#" id="logout">ログアウト</a>';
+    $('who').classList.remove('hidden');
+    $('logout').onclick = function (ev) {
+      ev.preventDefault(); clearToken();
+      if (window.google && google.accounts) google.accounts.id.disableAutoSelect();
+      $('form').classList.add('hidden'); $('who').classList.add('hidden'); askLogin();
+    };
+  }
+  function loadGis() {
+    if (!gisReady) gisReady = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+      s.onload = resolve; s.onerror = function () { reject(new Error('Googleログインを読み込めませんでした')); };
+      document.head.appendChild(s);
+    });
+    return gisReady;
+  }
+  var afterLogin = null, gisInited = false, loginNote = '';
+  // retry=true のとき（許可されていないアカウントだった等）は自動選択を止め、ボタンから選び直してもらう
+  function askLogin(then, retry) {
+    if (then) afterLogin = then;
+    $('login').classList.remove('hidden');
+    loadGis().then(function () {
+      if (!gisInited) { gisInited = true; google.accounts.id.initialize({
+        client_id: clientId, auto_select: true, cancel_on_tap_outside: false,
+        callback: function (r) {
+          var p = jwtPayload(r.credential);
+          if (!p) { msg('ログインに失敗しました。', false); return; }
+          idToken = r.credential;
+          try { sessionStorage.setItem(TOKEN_STORE, idToken); } catch (e) {}
+          $('login').classList.add('hidden'); showWho(p);
+          if (loginNote) { msg(loginNote, true); loginNote = ''; } else $('msg').innerHTML = '';
+          var f = afterLogin; afterLogin = null; if (f) f();
+        },
+      }); }
+      $('gbtn').innerHTML = '';
+      google.accounts.id.renderButton($('gbtn'), { theme: 'filled_blue', size: 'large', text: 'signin_with', locale: 'ja' });
+      if (retry) google.accounts.id.disableAutoSelect();
+      else google.accounts.id.prompt();
+    }).catch(function (err) { msg(err.message, false); });
+  }
 
   var C = null, slot = '', rows = [], sid = '', dateTouched = false;
   var $ = function (id) { return document.getElementById(id); };
@@ -128,11 +192,15 @@
   }
 
   // GASのウェブアプリと通信する。Cookieは送らない（Googleのログイン状態に左右されない）
+  // GET はクライアントIDの取得だけ。設定の取得と記録は POST で、鍵とIDトークンを付ける
   function call(method, body) {
     var opt = { method: method, credentials: 'omit', redirect: 'follow' };
     var url = api;
-    if (method === 'GET') url += (api.indexOf('?') < 0 ? '?' : '&') + 'api=config&k=' + encodeURIComponent(key);
-    else { opt.body = JSON.stringify(body); opt.headers = { 'Content-Type': 'text/plain;charset=utf-8' }; }
+    if (method === 'GET') url += '?api=client&k=' + encodeURIComponent(key);
+    else {
+      body.k = key; body.idToken = idToken;
+      opt.body = JSON.stringify(body); opt.headers = { 'Content-Type': 'text/plain;charset=utf-8' };
+    }
     return fetch(url, opt).then(function (r) {
       if (!r.ok) throw new Error('通信エラー（' + r.status + '）');
       return r.text();
@@ -142,7 +210,7 @@
       try { j = JSON.parse(t); } catch (e) { throw new Error('リンクが古いか、GAS側でエラーが出ています。メールで届いた最新のリンクから開き直してください'); }
       return j;
     }).then(function (j) {
-      if (!j.ok) throw new Error(j.error || '失敗しました');
+      if (!j.ok) { var e = new Error(j.error || '失敗しました'); e.code = j.code || ''; throw e; }
       return j;
     });
   }
@@ -162,20 +230,43 @@
     if (use.some(function (r) { return !(+r.min > 0); })) { msg('分が空欄の教材があります。', false); return; }
     if (!slot) { msg('時間帯を選んでください。', false); return; }
     var btn = this; btn.disabled = true; btn.textContent = '送信中…';
-    call('POST', { action: 'record', k: key, sid: sid, date: $('date').value, slot: slot, memo: $('memo').value, rows: use })
+    call('POST', { action: 'record', sid: sid, date: $('date').value, slot: slot, memo: $('memo').value, rows: use })
       .then(function (j) {
         var res = j.result;
         msg((res.saved < 0 ? 'この内容は記録済みです。' : '記録しました（' + res.saved + '件）。') + ' W' + res.week + 'の合計: ' + res.weekText, true);
         init();
       })
-      .catch(function (err) { msg('記録できませんでした: ' + (err.message || err), false); })
+      .catch(function (err) {
+        if (err.code === 'AUTH') {
+          // ログインが切れたら、入力はそのまま残してログインし直してもらう（送信は同じIDなので二重にならない）
+          clearToken(); $('who').classList.add('hidden');
+          msg(err.message + ' ログイン後にもう一度「記録する」を押してください。', false);
+          loginNote = 'ログインしました。入力はそのまま残っています。もう一度「記録する」を押してください。';
+          askLogin(null, true);
+        } else {
+          msg('記録できませんでした: ' + (err.message || err), false);
+        }
+      })
       .then(function () { btn.disabled = false; btn.textContent = '記録する'; });
   };
+
+  function loadConfig() {
+    msg('読み込み中…', true);
+    call('POST', { action: 'config' }).then(function (j) {
+      C = j.config; $('msg').innerHTML = ''; $('form').classList.remove('hidden'); init();
+    }).catch(function (err) {
+      if (err.code === 'AUTH') { clearToken(); $('who').classList.add('hidden'); msg(err.message, false); askLogin(loadConfig, true); return; }
+      msg('読み込めませんでした: ' + (err.message || err), false);
+    });
+  }
 
   if (!api || !key) { msg('リンクが正しくありません。メールで届いたリンクから開いてください。', false); return; }
   msg('読み込み中…', true);
   call('GET').then(function (j) {
-    C = j.config; $('msg').innerHTML = ''; $('form').classList.remove('hidden'); init();
+    clientId = j.clientId;
+    var p = loadSavedToken();
+    if (p) { showWho(p); loadConfig(); }
+    else { $('msg').innerHTML = ''; askLogin(loadConfig); }
   }).catch(function (err) { msg('読み込めませんでした: ' + (err.message || err), false); });
 })();
 </script>
