@@ -102,7 +102,8 @@
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function today() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
   function newSid() { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
-  function guessSlot() { var d = new Date(), w = d.getDay(), h = d.getHours(); if (w === 0 || w === 6) return '週末'; if (h < 11) return '朝'; if (h >= 17) return 'ランニング'; return 'その他'; }
+  function guessSlot() { var h = new Date().getHours(); if (h < 11) return '朝'; if (h < 14) return '昼'; if (h >= 17) return 'ランニング'; return 'その他'; }
+  function isWeekend() { var w = new Date().getDay(); return w === 0 || w === 6; }
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function msg(t, ok) { $('msg').innerHTML = t ? '<div class="msg ' + (ok ? 'ok' : 'ng') + '">' + esc(t) + '</div>' : ''; if (t) window.scrollTo(0, 0); }
 
@@ -202,8 +203,8 @@
     $('date').value = today(); dateTouched = false; sid = newSid();
     var p = preset();
     $('sub').textContent = p ? p.label : '';
-    slot = p ? p.slot : guessSlot(); drawSlots();
-    var kind = (p && p.kind) || (slot === '週末' ? '復習' : '新規');
+    slot = (p && p.slot) || guessSlot(); drawSlots();
+    var kind = (p && p.kind) || (isWeekend() ? '復習' : '新規');
     rows = [];
     if (p && p.rows.length) p.rows.forEach(function (r) { rows.push({ mat: r[0], min: r[1], keys: '', kind: kind }); });
     else rows.push({ mat: '', min: '', keys: '', kind: kind });
