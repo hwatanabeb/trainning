@@ -10,9 +10,9 @@
 <link rel="preconnect" href="https://script.googleusercontent.com">
 <link rel="preconnect" href="https://accounts.google.com">
 <style>
-  :root { --bg: #f5f5f5; --card: #fff; --text: #222; --sub: #555; --line: #ccc; --accent: #1a73e8; --onaccent: #fff; --ok: #e6f4ea; --ng: #fce8e6; }
+  :root { --bg: #f5f5f5; --card: #fff; --text: #222; --sub: #555; --line: #ccc; --accent: #1a73e8; --onaccent: #fff; --ok: #e6f4ea; --ng: #fce8e6; --wait: #fef7e0; --okline: #188038; --waitline: #f9ab00; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #121212; --card: #1e1e1e; --text: #e8e8e8; --sub: #aaa; --line: #444; --accent: #8ab4f8; --onaccent: #202124; --ok: #1e3a26; --ng: #4a1f1c; }
+    :root { --bg: #121212; --card: #1e1e1e; --text: #e8e8e8; --sub: #aaa; --line: #444; --accent: #8ab4f8; --onaccent: #202124; --ok: #1e3a26; --ng: #4a1f1c; --wait: #3d3417; --okline: #81c995; --waitline: #fdd663; }
   }
   body { font-family: -apple-system, Roboto, "Noto Sans JP", sans-serif; margin: 0; background: var(--bg); color: var(--text); }
   .wrap { max-width: 560px; margin: 0 auto; padding: 16px; }
@@ -31,7 +31,11 @@
   .submit { width: 100%; padding: 14px; font-size: 17px; font-weight: bold; border: none; border-radius: 12px; background: var(--accent); color: var(--onaccent); }
   .submit:disabled { opacity: .5; }
   .msg { padding: 12px; border-radius: 10px; margin-bottom: 12px; }
-  .ok { background: var(--ok); } .ng { background: var(--ng); }
+  .ok { background: var(--ok); border-left: 6px solid var(--okline); } .ng { background: var(--ng); }
+  .ok::before { content: "✓ "; font-weight: bold; color: var(--okline); }
+  .wait { background: var(--wait); border-left: 6px solid var(--waitline); display: flex; align-items: center; }
+  .wait::before { content: ""; flex: none; width: 14px; height: 14px; margin-right: 10px; border: 2px solid var(--waitline); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .hidden { display: none; }
   footer { margin-top: 120px; padding: 16px 0 32px; border-top: 1px solid var(--line); text-align: center; font-size: 12px; color: var(--sub); }
   footer a { color: var(--sub); }
@@ -105,7 +109,8 @@
   function guessSlot() { var h = new Date().getHours(); if (h < 11) return '朝'; if (h < 14) return '昼'; if (h >= 17) return 'ランニング'; return 'その他'; }
   function isWeekend() { var w = new Date().getDay(); return w === 0 || w === 6; }
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  function msg(t, ok) { $('msg').innerHTML = t ? '<div class="msg ' + (ok ? 'ok' : 'ng') + '">' + esc(t) + '</div>' : ''; if (t) window.scrollTo(0, 0); }
+  // ok: true=完了（緑）, false=失敗（赤）, 'wait'=処理中（黄・くるくる）
+  function msg(t, ok) { $('msg').innerHTML = t ? '<div class="msg ' + (ok === 'wait' ? 'wait' : ok ? 'ok' : 'ng') + '">' + esc(t) + '</div>' : ''; if (t) window.scrollTo(0, 0); }
 
   /* ---------- 設定の控え ---------- */
   function readCache() {
@@ -320,12 +325,12 @@
   function submit(p) {
     if (!session) {
       if (waitingLogin) return;  // ログイン待ちの間の連打は1回にまとめる
-      waitingLogin = true; msg('Googleログインのあと送信します…', true);
+      waitingLogin = true; msg('Googleログインのあと送信します…', 'wait');
       whenLoggedIn(function () { waitingLogin = false; var q = collect(); if (q) submit(q); });
       return;
     }
     init();  // すぐ次の入力ができるように空にする
-    sending++; msg('送信中…（' + names(p) + '）', true);
+    sending++; msg('送信中…（' + names(p) + '）', 'wait');
     var body = { action: 'record', sid: p.sid, date: p.date, slot: p.slot, memo: p.memo, rows: p.rows };
     call('POST', body).then(function (j) {
       var res = j.result;
@@ -368,7 +373,7 @@
     showForm(cache.config);
     if (clientId) whenLoggedIn(refreshConfig);
   }
-  if (!cache) msg('読み込み中…', true);
+  if (!cache) msg('読み込み中…', 'wait');
   var hadClientId = !!clientId;
   checkClientId().then(function () {
     if (!hadClientId && clientId) whenLoggedIn(refreshConfig);
